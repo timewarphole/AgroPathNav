@@ -35,7 +35,14 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(Pfinal Pfinal.c )
+add_executable(Pfinal Pfinal.c 
+        lib/control/pid.c
+        lib/motores/l298n.c
+        lib/sensores/hcsr04.c
+        lib/sensores/lm35.c
+        lib/sensores/fotoresistencia.c
+        lib/eeprom/eeprom.c
+        )
 
 pico_set_program_name(Pfinal "Pfinal")
 pico_set_program_version(Pfinal "0.1")
@@ -55,7 +62,12 @@ target_include_directories(Pfinal PRIVATE
 
 # Add any user requested libraries
 target_link_libraries(Pfinal 
-        
+        pico_stdlib
+        hardware_pwm
+        hardware_adc
+        hardware_timer
+        hardware_i2c
+
         )
 
 pico_add_extra_outputs(Pfinal)
