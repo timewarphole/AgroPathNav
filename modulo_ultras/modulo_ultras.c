@@ -49,11 +49,11 @@ int main() {
     // ----------------------------------------------------------
     PID_Controller pid;
 
-    float kp = 4.4f;
+    float kp = 4.5f;
     float ki = 0.12f;
     float kd = 1.0f;
 
-    float setpoint = 0.0f;       // Error deseado: centrado
+    float setpoint = 0.0f;       
     float integral_limit = 60.0f;
     float output_min = -100.0f;
     float output_max = +100.0f;
@@ -64,9 +64,9 @@ int main() {
     // ----------------------------------------------------------
     // Parámetros de control de motores
     // ----------------------------------------------------------
-    const int base_speed = 30;  // Velocidad base en % (ajusta según tu robot)
-    const int min_speed  = 15;  // Velocidad mínima para evitar que se detenga
-    const int max_speed  = 50;  // Velocidad máxima
+    const int base_speed = 50;  // Velocidad base en % (ajusta según tu robot)
+    const int min_speed  = 20;  // Velocidad mínima para evitar que se detenga
+    const int max_speed  = 70;  // Velocidad máxima
 
     // ----------------------------------------------------------
     // Bucle principal
@@ -91,8 +91,8 @@ int main() {
         // ------ Aplicar corrección a los motores ------
         // Motor izquierdo (A) reduce velocidad si correction > 0 (más cerca de la izquierda)
         // Motor derecho (B) aumenta velocidad si correction > 0
-        int speed_left  = base_speed - (int)correction;
-        int speed_right = base_speed + (int)correction;
+        int speed_left  = (base_speed - (int)correction);
+        int speed_right = (base_speed + (int)correction)+20;
 
         // Saturar velocidades
         if (speed_left < min_speed)   speed_left = min_speed;
