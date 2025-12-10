@@ -37,7 +37,8 @@ pico_sdk_init()
 
 add_executable(modulo_ultras modulo_ultras.c
 hcsr04.c
-pid.c )
+pid.c 
+l298n.c)
 
 pico_set_program_name(modulo_ultras "modulo_ultras")
 pico_set_program_version(modulo_ultras "0.1")
@@ -59,6 +60,8 @@ target_include_directories(modulo_ultras PRIVATE
 target_link_libraries(modulo_ultras 
         hardware_gpio
         hardware_timer
+        hardware_irq
+        hardware_pwm
         )
 
 pico_add_extra_outputs(modulo_ultras)
