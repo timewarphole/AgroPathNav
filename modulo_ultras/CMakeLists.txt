@@ -36,7 +36,8 @@ pico_sdk_init()
 # Add executable. Default name is the project name, version 0.1
 
 add_executable(modulo_ultras modulo_ultras.c
-hcsr04.c )
+hcsr04.c
+pid.c )
 
 pico_set_program_name(modulo_ultras "modulo_ultras")
 pico_set_program_version(modulo_ultras "0.1")

@@ -18,7 +18,7 @@ typedef struct {
 
 // --- Constantes ---
 #define HCSR04_TIMEOUT_US      30000   // Timeout de 30 ms (~5 m máx)
-#define HCSR04_MAX_DISTANCE_CM 20     // Distancia máx teórica
+#define HCSR04_MAX_DISTANCE_CM 10     // Distancia máx teórica
 #define HCSR04_MIN_DISTANCE_CM 2       // Distancia mín teórica
 #define SOUND_SPEED_CM_US      0.0343f // 343 m/s = 0.0343 cm/µs
 
