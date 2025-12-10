@@ -58,6 +58,7 @@ target_include_directories(modulo_ultras PRIVATE
 
 # Add any user requested libraries
 target_link_libraries(modulo_ultras 
+        pico_stdlib
         hardware_gpio
         hardware_timer
         hardware_irq

@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include "pico/stdlib.h"
+#include "hardware/gpio.h"
 #include "hcsr04.h"
 #include "pid.h"
 #include "l298n.h"
@@ -13,6 +14,53 @@
 #define MB_IN4_PIN  14  // Motor B IN4
 #define MB_ENB_PIN  15  // Motor B ENB (PWM)
 
+// Pin del botón de inicio
+#define START_BUTTON_PIN  22
+
+// ----------------------------------------------------------
+// Variables globales para el botón (polling)
+// ----------------------------------------------------------
+bool system_running = false;
+bool last_button_state = true;  // Pull-up: 1=no presionado, 0=presionado
+uint32_t last_button_time = 0;
+const uint32_t DEBOUNCE_TIME_MS = 200;  // 200ms de antirrebote
+
+// ----------------------------------------------------------
+// Función para leer botón con antirrebote (polling)
+// ----------------------------------------------------------
+void check_button() {
+    bool current_state = gpio_get(START_BUTTON_PIN);  // Lee el estado del pin
+    
+    // Detectar flanco descendente (presión del botón)
+    if (last_button_state == true && current_state == false) {
+        uint32_t now = to_ms_since_boot(get_absolute_time());
+        
+        // Antirrebote: ignorar si no han pasado 200ms
+        if ((now - last_button_time) >= DEBOUNCE_TIME_MS) {
+            last_button_time = now;
+            
+            // Toggle del estado
+            system_running = !system_running;
+            
+            printf("\n[BOTON] Sistema %s\n\n", system_running ? "INICIADO" : "DETENIDO");
+        }
+    }
+    
+    last_button_state = current_state;  // Actualizar estado
+}
+
+// ----------------------------------------------------------
+// Inicialización del botón (sin IRQ)
+// ----------------------------------------------------------
+void init_start_button() {
+    gpio_init(START_BUTTON_PIN);
+    gpio_set_dir(START_BUTTON_PIN, GPIO_IN);
+    gpio_pull_up(START_BUTTON_PIN);  // Pull-up interno (activo en bajo)
+    
+    printf("[BOTON] Configurado en GP%d (activo bajo con pull-up, polling)\n", START_BUTTON_PIN);
+    printf("[BOTON] Presiona el boton para INICIAR el sistema\n\n");
+}
+
 int main() {
 
     stdio_init_all();
@@ -20,7 +68,13 @@ int main() {
 
     printf("\n-----------------------------------------------------\n");
     printf("   Control PID con dos HC-SR04 para centrado lateral\n");
+    printf("   (Modo: Polling + IRQ Non-Blocking)\n");
     printf("-----------------------------------------------------\n\n");
+
+    // ----------------------------------------------------------
+    // Botón de inicio/parada
+    // ----------------------------------------------------------
+    init_start_button();
 
     // ----------------------------------------------------------
     // Sensores ultrasónicos
@@ -64,23 +118,62 @@ int main() {
     // ----------------------------------------------------------
     // Parámetros de control de motores
     // ----------------------------------------------------------
-    const int base_speed = 50;  // Velocidad base en % (ajusta según tu robot)
-    const int min_speed  = 20;  // Velocidad mínima para evitar que se detenga
-    const int max_speed  = 70;  // Velocidad máxima
+    const int base_speed = 50;
+    const int min_speed  = 20;
+    const int max_speed  = 70;
 
     // ----------------------------------------------------------
-    // Bucle principal
+    // Bucle principal (Non-Blocking con IRQ)
     // ----------------------------------------------------------
     while (true) {
 
-        // ------ Lectura secuencial para evitar interferencia ------
+        // ------ Leer botón en cada iteración ------
+        check_button();
+
+        // ------ Verificar si el sistema está corriendo ------
+        if (!system_running) {
+            // Detener motores y resetear PID
+            l298n_stop_all(&motors);
+            pid_reset(&pid);
+            
+            printf("Sistema detenido. Esperando boton...\r");
+            sleep_ms(100);
+            continue;
+        }
+
+        // ------ Disparo casi simultáneo con pequeño delay ------
         hcsr04_trigger(&sensor_left);
-        float d_left = hcsr04_get_distance_cm(&sensor_left);
-
-        sleep_ms(60);
-
+        sleep_us(10);
         hcsr04_trigger(&sensor_right);
-        float d_right = hcsr04_get_distance_cm(&sensor_right);
+
+        uint32_t start_time = time_us_32();
+        bool left_ready  = false;
+        bool right_ready = false;
+
+        // ------ Polling no bloqueante (máx 30ms de espera) ------
+        while ((time_us_32() - start_time) < 30000) {
+            
+            if (!left_ready && hcsr04_is_ready(&sensor_left)) {
+                left_ready = true;
+            }
+            
+            if (!right_ready && hcsr04_is_ready(&sensor_right)) {
+                right_ready = true;
+            }
+
+            if (left_ready && right_ready) {
+                break;
+            }
+
+            tight_loop_contents();
+        }
+
+        // ------ Lectura de resultados ------
+        float d_left  = hcsr04_read_distance_cm(&sensor_left);
+        float d_right = hcsr04_read_distance_cm(&sensor_right);
+
+        if (d_left <= 0.0f)  d_left  = 0.0f;
+        if (d_right <= 0.0f) d_right = 0.0f;
 
         // ------ Error para el PID ------
         float error_lateral = d_left - d_right;
@@ -89,10 +182,8 @@ int main() {
         float correction = pid_compute(&pid, error_lateral);
 
         // ------ Aplicar corrección a los motores ------
-        // Motor izquierdo (A) reduce velocidad si correction > 0 (más cerca de la izquierda)
-        // Motor derecho (B) aumenta velocidad si correction > 0
         int speed_left  = (base_speed - (int)correction);
-        int speed_right = (base_speed + (int)correction)+20;
+        int speed_right = (base_speed + (int)correction) + 15;
 
         // Saturar velocidades
         if (speed_left < min_speed)   speed_left = min_speed;
@@ -100,7 +191,7 @@ int main() {
         if (speed_right < min_speed)  speed_right = min_speed;
         if (speed_right > max_speed)  speed_right = max_speed;
 
-        // Enviar comandos a los motores (dirección 1 = adelante)
+        // Enviar comandos a los motores
         l298n_set_motor(&motors, 0, speed_left,  1); // Motor A (Izquierdo)
         l298n_set_motor(&motors, 1, speed_right, 1); // Motor B (Derecho)
 
@@ -108,7 +199,7 @@ int main() {
         printf("DL: %.2f cm | DR: %.2f cm | Err: %.2f | PID: %.2f | ML: %d%% | MR: %d%%\n",
                d_left, d_right, error_lateral, correction, speed_left, speed_right);
 
-        sleep_ms(100);
+        sleep_ms(50);
     }
 
     return 0;
