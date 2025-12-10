@@ -1,203 +1,368 @@
 #include <stdio.h>
+#include <string.h>
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
+#include "hardware/adc.h"
 #include "hcsr04.h"
 #include "pid.h"
 #include "l298n.h"
+#include "lm35.h"
+#include "fotoresistencia.h"
+#include "eeprom.h"
 
 // Pines de los motores
-#define MA_IN1_PIN  9   // Motor A IN1
-#define MA_IN2_PIN  10  // Motor A IN2
-#define MA_ENA_PIN  8   // Motor A ENA (PWM)
+#define MA_IN1_PIN  9   
+#define MA_IN2_PIN  10  
+#define MA_ENA_PIN  8   
 
-#define MB_IN3_PIN  11  // Motor B IN3
-#define MB_IN4_PIN  14  // Motor B IN4
-#define MB_ENB_PIN  15  // Motor B ENB (PWM)
+#define MB_IN3_PIN  11  
+#define MB_IN4_PIN  14  
+#define MB_ENB_PIN  15  
 
-// Pin del botón de inicio
+// Pin del botón
 #define START_BUTTON_PIN  22
+
+// Tiempo de operación (10 segundos)
+#define RUN_TIME_MS  10000
+
+// Intervalo de guardado en EEPROM (100ms = 10 muestras/seg)
+#define EEPROM_SAVE_INTERVAL_MS  100
+
+// Buffer para comandos seriales
+#define CMD_BUFFER_SIZE 16
 
 // ----------------------------------------------------------
 // Variables globales para el botón (polling)
 // ----------------------------------------------------------
 bool system_running = false;
-bool last_button_state = true;  // Pull-up: 1=no presionado, 0=presionado
+bool last_button_state = true;
 uint32_t last_button_time = 0;
-const uint32_t DEBOUNCE_TIME_MS = 200;  // 200ms de antirrebote
+uint32_t run_start_time = 0;
+const uint32_t DEBOUNCE_TIME_MS = 200;
+
+// ----------------------------------------------------------
+// Variables para guardado periódico en EEPROM
+// ----------------------------------------------------------
+uint32_t last_eeprom_save_time = 0;
+uint16_t sample_counter = 0;
+
+// ----------------------------------------------------------
+// Buffer para comandos
+// ----------------------------------------------------------
+char cmd_buffer[CMD_BUFFER_SIZE];
+uint8_t cmd_index = 0;
 
 // ----------------------------------------------------------
 // Función para leer botón con antirrebote (polling)
 // ----------------------------------------------------------
 void check_button() {
-    bool current_state = gpio_get(START_BUTTON_PIN);  // Lee el estado del pin
+    bool current_state = gpio_get(START_BUTTON_PIN);
     
-    // Detectar flanco descendente (presión del botón)
     if (last_button_state == true && current_state == false) {
         uint32_t now = to_ms_since_boot(get_absolute_time());
         
-        // Antirrebote: ignorar si no han pasado 200ms
         if ((now - last_button_time) >= DEBOUNCE_TIME_MS) {
             last_button_time = now;
             
-            // Toggle del estado
-            system_running = !system_running;
-            
-            printf("\n[BOTON] Sistema %s\n\n", system_running ? "INICIADO" : "DETENIDO");
+            if (!system_running) {
+                system_running = true;
+                run_start_time = now;
+                last_eeprom_save_time = now;
+                sample_counter = 0;
+                printf("\n[BOTON] Sistema INICIADO - 10 segundos de operacion\n\n");
+            } else {
+                system_running = false;
+                printf("\n[BOTON] Sistema DETENIDO por el usuario\n");
+                printf("[EEPROM] Muestras guardadas: %d\n\n", sample_counter);
+            }
         }
     }
     
-    last_button_state = current_state;  // Actualizar estado
+    last_button_state = current_state;
 }
 
 // ----------------------------------------------------------
-// Inicialización del botón (sin IRQ)
+// Verificar timeout de 10 segundos
 // ----------------------------------------------------------
-void init_start_button() {
-    gpio_init(START_BUTTON_PIN);
-    gpio_set_dir(START_BUTTON_PIN, GPIO_IN);
-    gpio_pull_up(START_BUTTON_PIN);  // Pull-up interno (activo en bajo)
+void check_timeout() {
+    if (system_running) {
+        uint32_t now = to_ms_since_boot(get_absolute_time());
+        uint32_t elapsed = now - run_start_time;
+        
+        if (elapsed >= RUN_TIME_MS) {
+            system_running = false;
+            printf("\n[TIMEOUT] 10 segundos cumplidos - Sistema DETENIDO\n");
+            printf("[EEPROM] Muestras guardadas: %d\n\n", sample_counter);
+        }
+    }
+}
+
+// ----------------------------------------------------------
+// Guardar SOLO temperatura y luz en EEPROM (forzada)
+// ----------------------------------------------------------
+// En main.c
+
+void save_environmental_data(LM35_Sensor *temp_sensor, LDR_Sensor *light_sensor) {
+    uint32_t now = to_ms_since_boot(get_absolute_time());
     
-    printf("[BOTON] Configurado en GP%d (activo bajo con pull-up, polling)\n", START_BUTTON_PIN);
-    printf("[BOTON] Presiona el boton para INICIAR el sistema\n\n");
+    if ((now - last_eeprom_save_time) >= EEPROM_SAVE_INTERVAL_MS) {
+        last_eeprom_save_time = now;
+        
+        // Leer sensores
+        float temperature = lm35_read_celsius(temp_sensor);
+        float light = ldr_read_percent(light_sensor);
+        
+        // Crear registro
+        EnvironmentalRecord record;
+        record.temperature = (temperature >= 0.0f) ? temperature : 0.0f;
+        record.light = (light >= 0.0f) ? light : 0.0f;
+        
+
+        record.sample_id = 0; 
+        // ---------------------------------------------------------
+        
+        // Intentar guardar (con reintentos)
+        eeprom_error_t result = eeprom_store_sample(&record);
+        uint8_t retries = 3;
+        while (result != EEPROM_SUCCESS && retries > 0) {
+            sleep_ms(10);
+            result = eeprom_store_sample(&record);
+            retries--;
+        }
+        
+        if (result == EEPROM_SUCCESS) {
+            // Este contador es SOLO para que sepas cuántas llevas en ESTA ejecución.
+            // No es el ID que se guarda en la memoria.
+            sample_counter++; 
+        } else {
+            printf("[EEPROM] Error persistente (codigo: %d)\n", result);
+        }
+    }
+}
+
+// ----------------------------------------------------------
+// Mostrar información de memoria EEPROM
+// ----------------------------------------------------------
+void show_eeprom_info() {
+    uint16_t capacity = eeprom_get_capacity();
+    uint16_t used = eeprom_get_record_count();
+    uint16_t available = capacity - used;
+    float percent_used = (used * 100.0f) / capacity;
+    
+    printf("\n========== ESTADO DE MEMORIA EEPROM ==========\n");
+    printf("Capacidad total:   %d registros\n", capacity);
+    printf("Registros usados:  %d (%.1f%%)\n", used, percent_used);
+    printf("Espacio libre:     %d registros\n", available);
+    printf("Tamano registro:   %d bytes\n", (int)sizeof(EnvironmentalRecord));
+    printf("===============================================\n\n");
+}
+
+// ----------------------------------------------------------
+// Mostrar todos los datos almacenados
+// ----------------------------------------------------------
+void show_all_data() {
+    uint16_t count = eeprom_get_record_count();
+    
+    if (count == 0) {
+        printf("\n[EEPROM] No hay datos almacenados\n\n");
+        return;
+    }
+    
+    printf("\n========== DATOS ALMACENADOS (DATA) ==========\n");
+    printf("ID  | Temp(°C) | Luz(%%)\n");
+    printf("----+----------+--------\n");
+    
+    EnvironmentalRecord buffer[EEPROM_MAX_RECORDS];
+    uint16_t read_count = 0;
+    
+    eeprom_error_t result = eeprom_read_all_samples(buffer, &read_count);
+    
+    if (result == EEPROM_SUCCESS && read_count > 0) {
+        for (uint16_t i = 0; i < read_count; i++) {
+            printf("%3d | %8.2f | %6.1f\n",
+                   buffer[i].sample_id,
+                   buffer[i].temperature,
+                   buffer[i].light);
+        }
+        printf("==============================================\n");
+        printf("Total de muestras: %d\n", read_count);
+    } else {
+        printf("[ERROR] Fallo al leer datos (codigo: %d)\n", result);
+    }
+    
+    show_eeprom_info();
+}
+
+// ----------------------------------------------------------
+// Procesar comandos por serial
+// ----------------------------------------------------------
+void process_serial_commands() {
+    int c = getchar_timeout_us(10000);  // 10ms timeout
+    
+    if (c == PICO_ERROR_TIMEOUT) {
+        return;
+    }
+    
+    if (c >= 'a' && c <= 'z') {
+        c = c - 32;
+    }
+    
+    if (c == '\r' || c == '\n') {
+        if (cmd_index > 0) {
+            cmd_buffer[cmd_index] = '\0';
+            
+            if (strcmp(cmd_buffer, "DATA") == 0) {
+                show_all_data();
+            }
+            else if (strcmp(cmd_buffer, "CLEAN") == 0) {
+                eeprom_clear();
+                printf("\n[EEPROM] Memoria borrada completamente\n");
+                show_eeprom_info();
+            }
+            else if (strcmp(cmd_buffer, "INFO") == 0) {
+                show_eeprom_info();
+            }
+            else if (strcmp(cmd_buffer, "HELP") == 0) {
+                printf("\n========== COMANDOS ==========\n");
+                printf("DATA  - Mostrar datos\n");
+                printf("CLEAN - Borrar EEPROM\n");
+                printf("INFO  - Estado memoria\n");
+                printf("HELP  - Esta ayuda\n");
+                printf("============================\n\n");
+            }
+            else {
+                printf("\nComando desconocido: '%s'\nEscribe HELP\n\n", cmd_buffer);
+            }
+            
+            cmd_index = 0;
+        }
+    }
+    else if (c >= 32 && c <= 126) {
+        if (cmd_index < CMD_BUFFER_SIZE - 1) {
+            cmd_buffer[cmd_index++] = (char)c;
+            putchar(c);
+        }
+    }
+    else if (c == 127 || c == 8) {
+        if (cmd_index > 0) {
+            cmd_index--;
+            printf("\b \b");
+        }
+    }
 }
 
 int main() {
-
     stdio_init_all();
-    sleep_ms(1500);
+    sleep_ms(2000);  // Más tiempo para USB
 
-    printf("\n-----------------------------------------------------\n");
-    printf("   Control PID con dos HC-SR04 para centrado lateral\n");
-    printf("   (Modo: Polling + IRQ Non-Blocking)\n");
-    printf("-----------------------------------------------------\n\n");
-
-    // ----------------------------------------------------------
-    // Botón de inicio/parada
-    // ----------------------------------------------------------
-    init_start_button();
+    printf("\n=====================================================\n");
+    printf("   Sistema Agricola - Modo Baterias + PC DATA\n");
+    printf("=====================================================\n\n");
 
     // ----------------------------------------------------------
-    // Sensores ultrasónicos
+    // Inicialización ADC
     // ----------------------------------------------------------
-    HCSR04_Sensor sensor_left;
-    HCSR04_Sensor sensor_right;
+    adc_init();
+    adc_set_temp_sensor_enabled(true);
+    printf("[ADC] Inicializado\n");
 
-    hcsr04_init(&sensor_left,  HCSR04_LEFT_TRIG_PIN,  HCSR04_LEFT_ECHO_PIN);
+    // ----------------------------------------------------------
+    // Botón
+    // ----------------------------------------------------------
+    gpio_init(START_BUTTON_PIN);
+    gpio_set_dir(START_BUTTON_PIN, GPIO_IN);
+    gpio_pull_up(START_BUTTON_PIN);
+    printf("[BOTON] GP%d listo\n", START_BUTTON_PIN);
+
+    // ----------------------------------------------------------
+    // Sensores ambientales
+    // ----------------------------------------------------------
+    LM35_Sensor temp_sensor;
+    LDR_Sensor light_sensor;
+    
+    lm35_init(&temp_sensor, LM35_ADC_CHANNEL, LM35_GPIO_PIN);
+    ldr_init(&light_sensor, LDR_ADC_CHANNEL, LDR_GPIO_PIN);
+    printf("[SENSORS] LM35+ LDR listos\n");
+
+    // ----------------------------------------------------------
+    // EEPROM (crítico para baterías)
+    // ----------------------------------------------------------
+    printf("[EEPROM] Inicializando...");
+    eeprom_error_t status = eeprom_init();
+    if (status == EEPROM_SUCCESS) {
+        printf(" OK\n");
+        show_eeprom_info();
+    } else {
+        printf(" FALLO (codigo %d)\n", status);
+    }
+
+    // ----------------------------------------------------------
+    // Control (HC-SR04 + Motores + PID)
+    // ----------------------------------------------------------
+    HCSR04_Sensor sensor_left, sensor_right;
+    hcsr04_init(&sensor_left, HCSR04_LEFT_TRIG_PIN, HCSR04_LEFT_ECHO_PIN);
     hcsr04_init(&sensor_right, HCSR04_RIGHT_TRIG_PIN, HCSR04_RIGHT_ECHO_PIN);
-
     hcsr04_register_sensor(&sensor_left);
     hcsr04_register_sensor(&sensor_right);
 
-    // ----------------------------------------------------------
-    // Driver de motores L298N
-    // ----------------------------------------------------------
     L298N_Driver motors;
-    l298n_init(&motors, 
-               MA_IN1_PIN, MA_IN2_PIN, MA_ENA_PIN,  // Motor A (Izquierdo)
-               MB_IN3_PIN, MB_IN4_PIN, MB_ENB_PIN); // Motor B (Derecho)
+    l298n_init(&motors, MA_IN1_PIN, MA_IN2_PIN, MA_ENA_PIN,
+                      MB_IN3_PIN, MB_IN4_PIN, MB_ENB_PIN);
 
-    printf("[L298N] Motores inicializados\n");
-
-    // ----------------------------------------------------------
-    // PID: error = distancia_izq - distancia_der
-    // ----------------------------------------------------------
     PID_Controller pid;
+    pid_init(&pid, 4.5f, 0.12f, 1.0f, 0.0f, 60.0f, -100.0f, 100.0f);
 
-    float kp = 4.5f;
-    float ki = 0.12f;
-    float kd = 1.0f;
+    const int base_speed = 50, min_speed = 20, max_speed = 70;
 
-    float setpoint = 0.0f;       
-    float integral_limit = 60.0f;
-    float output_min = -100.0f;
-    float output_max = +100.0f;
-
-    pid_init(&pid, kp, ki, kd, setpoint,
-             integral_limit, output_min, output_max);
+    printf("\n[SISTEMA] Boton para 10s | DATA/CLEAN/INFO/HELP\n\n");
 
     // ----------------------------------------------------------
-    // Parámetros de control de motores
-    // ----------------------------------------------------------
-    const int base_speed = 50;
-    const int min_speed  = 20;
-    const int max_speed  = 70;
-
-    // ----------------------------------------------------------
-    // Bucle principal (Non-Blocking con IRQ)
+    // Bucle principal optimizado
     // ----------------------------------------------------------
     while (true) {
-
-        // ------ Leer botón en cada iteración ------
+        process_serial_commands();
         check_button();
+        check_timeout();
 
-        // ------ Verificar si el sistema está corriendo ------
         if (!system_running) {
-            // Detener motores y resetear PID
             l298n_stop_all(&motors);
-            pid_reset(&pid);
-            
-            printf("Sistema detenido. Esperando boton...\r");
-            sleep_ms(100);
+            sleep_ms(50);  // ← SIN pid_reset() para no interferir
             continue;
         }
 
-        // ------ Disparo casi simultáneo con pequeño delay ------
+        // Guardar datos ambientales
+        save_environmental_data(&temp_sensor, &light_sensor);
+
+        // Control silencioso PID
         hcsr04_trigger(&sensor_left);
         sleep_us(10);
         hcsr04_trigger(&sensor_right);
 
         uint32_t start_time = time_us_32();
-        bool left_ready  = false;
-        bool right_ready = false;
-
-        // ------ Polling no bloqueante (máx 30ms de espera) ------
+        bool left_ready = false, right_ready = false;
         while ((time_us_32() - start_time) < 30000) {
-            
-            if (!left_ready && hcsr04_is_ready(&sensor_left)) {
-                left_ready = true;
-            }
-            
-            if (!right_ready && hcsr04_is_ready(&sensor_right)) {
-                right_ready = true;
-            }
-
-            if (left_ready && right_ready) {
-                break;
-            }
-
+            if (!left_ready && hcsr04_is_ready(&sensor_left)) left_ready = true;
+            if (!right_ready && hcsr04_is_ready(&sensor_right)) right_ready = true;
+            if (left_ready && right_ready) break;
             tight_loop_contents();
         }
 
-        // ------ Lectura de resultados ------
-        float d_left  = hcsr04_read_distance_cm(&sensor_left);
+        float d_left = hcsr04_read_distance_cm(&sensor_left);
         float d_right = hcsr04_read_distance_cm(&sensor_right);
-
-        if (d_left <= 0.0f)  d_left  = 0.0f;
+        if (d_left <= 0.0f) d_left = 0.0f;
         if (d_right <= 0.0f) d_right = 0.0f;
 
-        // ------ Error para el PID ------
-        float error_lateral = d_left - d_right;
+        float error = d_left - d_right;
+        float correction = pid_compute(&pid, error);
 
-        // ------ PID ------
-        float correction = pid_compute(&pid, error_lateral);
-
-        // ------ Aplicar corrección a los motores ------
-        int speed_left  = (base_speed - (int)correction);
+        int speed_left = (base_speed - (int)correction);
         int speed_right = (base_speed + (int)correction) + 15;
+        
+        speed_left = speed_left < min_speed ? min_speed : (speed_left > max_speed ? max_speed : speed_left);
+        speed_right = speed_right < min_speed ? min_speed : (speed_right > max_speed ? max_speed : speed_right);
 
-        // Saturar velocidades
-        if (speed_left < min_speed)   speed_left = min_speed;
-        if (speed_left > max_speed)   speed_left = max_speed;
-        if (speed_right < min_speed)  speed_right = min_speed;
-        if (speed_right > max_speed)  speed_right = max_speed;
-
-        // Enviar comandos a los motores
-        l298n_set_motor(&motors, 0, speed_left,  1); // Motor A (Izquierdo)
-        l298n_set_motor(&motors, 1, speed_right, 1); // Motor B (Derecho)
-
-        // ------ Información útil ------
-        printf("DL: %.2f cm | DR: %.2f cm | Err: %.2f | PID: %.2f | ML: %d%% | MR: %d%%\n",
-               d_left, d_right, error_lateral, correction, speed_left, speed_right);
+        l298n_set_motor(&motors, 0, speed_left, 1);
+        l298n_set_motor(&motors, 1, speed_right, 1);
 
         sleep_ms(50);
     }

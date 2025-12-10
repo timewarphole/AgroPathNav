@@ -38,7 +38,11 @@ pico_sdk_init()
 add_executable(modulo_ultras modulo_ultras.c
 hcsr04.c
 pid.c 
-l298n.c)
+l298n.c
+lm35.c
+fotoresistencia.c
+lm35.c
+eeprom.c)
 
 pico_set_program_name(modulo_ultras "modulo_ultras")
 pico_set_program_version(modulo_ultras "0.1")
@@ -63,6 +67,8 @@ target_link_libraries(modulo_ultras
         hardware_timer
         hardware_irq
         hardware_pwm
+        hardware_i2c
+        hardware_adc
         )
 
 pico_add_extra_outputs(modulo_ultras)
