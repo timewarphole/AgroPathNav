@@ -2,9 +2,6 @@
  * @file eeprom.h
  * @brief Driver para EEPROM 24LC128 con buffer circular para muestras ambientales
  * @details Sistema de almacenamiento persistente con:
- *          - Buffer circular automático (wrap-around)
- *          - Metadatos persistentes (write_index, count)
- *          - Comandos DATA (leer N muestras) y CLEAR (limpiar buffer)
  * 
  * © 2025
  */
@@ -100,7 +97,6 @@ eeprom_error_t eeprom_write_bytes(uint16_t address, const uint8_t *data, size_t 
 eeprom_error_t eeprom_read_bytes(uint16_t address, uint8_t *data, size_t length);
 eeprom_error_t eeprom_read_record(uint16_t record_index, EnvironmentalRecord *record);
 
-/* ========== FUNCIÓN AGREGADA (FALTANTE) ========== */
 /**
  * @brief Imprime en consola todos los registros ordenados cronológicamente (comando DATA)
  */
